@@ -83,9 +83,23 @@ void main() {
       const expr = "a > {:test1} && b = {:test2} || c = {:test2}";
 
       expect(
-        client.filter(expr, {"test2": "hello"}),
-        'a > {:test1} && b = "hello" || c = "hello"',
+        // note: last chars ensure correct special chars replacement
+        client.filter(expr, {"test2": "test\$\$"}),
+        'a > {:test1} && b = "test\$\$" || c = "test\$\$"',
       );
+    });
+
+    test("regex chaining replacements", () {
+      final client = PocketBase("https://example.com/");
+      const expr = "a > {:test1} && b = {:test2} || c = {:test3}";
+
+      final result = client.filter(expr, {
+        "test1": "{:test2}",
+        "test2": "{:test1}",
+        "test3": "abc",
+      });
+
+      expect(result, 'a > "{:test2}" && b = "{:test1}" || c = "abc"');
     });
 
     test("filter expression with all placeholder types", () {

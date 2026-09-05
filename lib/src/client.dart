@@ -21,6 +21,8 @@ import "services/sql_service.dart";
 
 const bool isWeb = bool.fromEnvironment("dart.library.js_util");
 
+final placeholderPattern = RegExp(r"\{\:([\w\-\.]+)\}");
+
 /// The main PocketBase API client.
 class PocketBase {
   @Deprecated("use baseURL")
@@ -172,31 +174,37 @@ class PocketBase {
   ///   { "title": "example", "created": DateTime.now() },
   /// ));
   /// ```
-  String filter(String expr, [Map<String, dynamic> query = const {}]) {
-    if (query.isEmpty) {
+  String filter(String expr, [Map<String, dynamic> params = const {}]) {
+    if (params.isEmpty) {
       return expr;
     }
 
-    query.forEach((key, value) {
+    String stringify(dynamic value) {
       if (value == null || value is num || value is bool) {
-        value = value.toString();
-      } else if (value is DateTime) {
-        value =
-            jsonEncode(value.toUtc().toIso8601String().replaceFirst("T", " "));
-      } else if (value is String) {
-        value = jsonEncode(value);
-      } else {
-        final stringified = jsonEncode(value);
-        if (stringified.startsWith("[") || stringified.startsWith("{")) {
-          value = jsonEncode(stringified);
-        } else {
-          value = stringified;
-        }
+        return value.toString();
       }
-      expr = expr.replaceAll("{:$key}", value.toString());
-    });
 
-    return expr;
+      if (value is DateTime) {
+        return jsonEncode(
+          value.toUtc().toIso8601String().replaceFirst("T", " "),
+        );
+      }
+
+      if (value is String) {
+        return jsonEncode(value);
+      }
+
+      final stringified = jsonEncode(value);
+      if (stringified.startsWith("[") || stringified.startsWith("{")) {
+        return jsonEncode(stringified);
+      }
+      return stringified;
+    }
+
+    return expr.replaceAllMapped(placeholderPattern, (match) {
+      final key = match.group(1);
+      return params.containsKey(key) ? stringify(params[key]) : match[0]!;
+    });
   }
 
   @Deprecated("use pb.files.getURL()")
