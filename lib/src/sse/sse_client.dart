@@ -69,7 +69,9 @@ class SseClient {
 
   final String _url;
 
-  late final http.Client _httpClient;
+  final http.Client Function() _httpClientFactory;
+
+  late http.Client _httpClient;
 
   /// Initializes the client and connects to the provided url.
   SseClient(
@@ -81,11 +83,11 @@ class SseClient {
     /// The underlying http client that will be used to send the request.
     /// This is used primarily for the unit tests.
     http.Client Function()? httpClientFactory,
-  }) {
+  }) : _httpClientFactory = httpClientFactory ?? http.Client.new {
     _maxRetry = maxRetry;
     _onClose = onClose;
     _onError = onError;
-    _httpClient = httpClientFactory?.call() ?? http.Client();
+    _httpClient = _httpClientFactory();
     _init();
   }
 
@@ -110,7 +112,11 @@ class SseClient {
       _messageStreamController.close();
     }
 
-    _httpClient.close();
+    try {
+      _httpClient.close();
+    } catch (_) {
+      // Already closed
+    }
 
     _onClose?.call();
   }
@@ -118,6 +124,16 @@ class SseClient {
   void _init() async {
     if (isClosed) {
       return; // already closed
+    }
+
+    // Start each attempt with a fresh client.
+    if (_retryAttempts > 0) {
+      try {
+        _httpClient.close();
+      } catch (_) {
+        // Already closed
+      }
+      _httpClient = _httpClientFactory();
     }
 
     var sseMessage = SseMessage();
@@ -205,6 +221,10 @@ class SseClient {
   }
 
   void _reconnect([int retryTimeout = 0]) {
+    if (isClosed) {
+      return; // Already closed
+    }
+
     if (_retryAttempts >= _maxRetry) {
       // no more retries
       close();
