@@ -4,7 +4,6 @@ import "dart:convert";
 import "package:http/http.dart" as http;
 
 import "../client_exception.dart";
-
 import "sse_message.dart";
 
 /// Very rudimentary streamed response http client wrapper compatible
@@ -47,6 +46,17 @@ class SseClient {
   int _retryAttempts = 0;
   num _maxRetry = double.infinity;
 
+  /// Fires when the stream has been silent for [inactivityTimeout].
+  Timer? _inactivityTimer;
+
+  /// How long the stream may stay silent before it is considered dead.
+  ///
+  /// A lost connection often leaves a half-open socket: no data arrives, but no
+  /// error is raised and the stream never completes, so none of the reconnect
+  /// paths below run and the client waits forever. PocketBase sends regular
+  /// keep-alive frames, so prolonged silence means the connection is gone.
+  final Duration inactivityTimeout;
+
   /// Indicates whether the client was closed.
   bool get isClosed => _isClosed;
   bool _isClosed = false;
@@ -77,6 +87,7 @@ class SseClient {
   SseClient(
     this._url, {
     num maxRetry = double.infinity,
+    this.inactivityTimeout = const Duration(minutes: 10),
     void Function()? onClose,
     void Function(dynamic err)? onError,
 
@@ -105,6 +116,8 @@ class SseClient {
     _isClosed = true;
 
     _retryTimer?.cancel();
+    _inactivityTimer?.cancel();
+    _inactivityTimer = null;
 
     _responseStreamSubscription?.cancel();
 
@@ -158,11 +171,17 @@ class SseClient {
       sseMessage = SseMessage();
       await _responseStreamSubscription?.cancel();
 
+      _startInactivityTimer();
+
       _responseStreamSubscription = response.stream
           .transform(const Utf8Decoder())
           .transform(const LineSplitter())
           .listen(
         (line) {
+          // Any line, including the server's keep-alive comments, proves the
+          // connection is still delivering data.
+          _resetInactivityTimer();
+
           // message end detected
           if (line.isEmpty) {
             _messageStreamController.add(sseMessage);
@@ -203,12 +222,14 @@ class SseClient {
         onError: (dynamic err) {
           // usually triggered on abruptly connection termination
           // (eg. when the server goes down)
+          _stopInactivityTimer();
           _onError?.call(err);
           _reconnect(sseMessage.retry);
         },
         onDone: () {
           // usually triggered on graceful connection termination
           // (eg. when the server stops streaming in case on idle client)
+          _stopInactivityTimer();
           _onError?.call(null);
           _reconnect(sseMessage.retry);
         },
@@ -224,6 +245,8 @@ class SseClient {
     if (isClosed) {
       return; // Already closed
     }
+
+    _stopInactivityTimer();
 
     if (_retryAttempts >= _maxRetry) {
       // no more retries
@@ -246,5 +269,39 @@ class SseClient {
       _retryAttempts++;
       _init();
     });
+  }
+
+  /// (Re)starts the deadline that detects a stream that has gone silent.
+  void _startInactivityTimer() {
+    _inactivityTimer?.cancel();
+    _inactivityTimer = Timer(inactivityTimeout, () {
+      _inactivityTimer = null;
+      if (isClosed) return;
+
+      _onError?.call(
+        ClientException(
+          url: Uri.parse(_url),
+          originalError:
+              "no data received for ${inactivityTimeout.inSeconds}s; "
+              "assuming the connection is dead",
+        ),
+      );
+
+      // Reuse the normal reconnect path so retry counting and backoff apply.
+      _reconnect();
+    });
+  }
+
+  void _stopInactivityTimer() {
+    _inactivityTimer?.cancel();
+    _inactivityTimer = null;
+  }
+
+  /// Resets the inactivity deadline after any inbound line.
+  void _resetInactivityTimer() {
+    if (_inactivityTimer == null) {
+      return; // not connected
+    }
+    _startInactivityTimer();
   }
 }
